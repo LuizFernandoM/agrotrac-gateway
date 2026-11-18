@@ -130,6 +130,21 @@ try {
   await expect('/health/live', 200);
   passed.push('image, nginx -V/-t, env validation, loopback and readiness');
 
+  const web = await expect('/?source=fixture', 200);
+  assert.match(web.text, /AgroTrac Web Fixture/);
+  assert.match(web.headers['content-type'], /^text\/html\b/);
+  assert.equal(web.headers['cache-control'], 'no-store');
+  assert.equal(web.headers['x-content-type-options'], 'nosniff');
+  assert.equal((await expect('/', 200, { method: 'HEAD' })).text, '');
+  assert.match((await expect('/assets/fixture.js?v=1', 200)).headers['content-type'], /^(application|text)\/javascript\b/);
+  assert.match((await expect('/assets/fixture.css', 200)).headers['content-type'], /^text\/css\b/);
+  for (const path of ['/silos', '/index.html', '/assets/', '/assets/missing.js', '/assets//fixture.js', '/assets/%66ixture.js', '/assets/nested/../fixture.js', '/v1/unknown.js', '/health/unknown.js', '/internal/unknown.js', '/live/unknown.js']) {
+    await expect(path, 404);
+  }
+  await expect('/', 405, { method: 'POST' });
+  await expect('/assets/fixture.js', 405, { method: 'POST' });
+  passed.push('mounted SPA shell, static MIME, HEAD and Web route isolation');
+
   const core = '/v1/core/bookings';
   const audit = '/v1/audit/weighings/sync';
   const loginPath = '/v1/live/auth/login';

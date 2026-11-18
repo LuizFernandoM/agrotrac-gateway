@@ -27,6 +27,7 @@ http {
     map $request_uri $canonical_path {
         default "";
         ~^(/(?:[A-Za-z0-9_-]+(?:/[A-Za-z0-9_-]+)*)?)(?:[?].*)?$ $1;
+        ~^(/assets/[A-Za-z0-9_-]+(?:\.[A-Za-z0-9_-]+)+)(?:[?].*)?$ $1;
     }
     map $http_upgrade $upgrade_connection {
         default upgrade;
@@ -195,6 +196,20 @@ http {
             proxy_pass http://$authorized_audit;
         }
 
+        # The Web router uses hash fragments, so every registered view requests /.
+        location = / {
+            if ($request_method !~ ^(GET|HEAD)$) { return 405; }
+            root /usr/share/nginx/html;
+            types { text/html html; }
+            try_files /index.html =404;
+        }
+        location ~ ^/assets/[A-Za-z0-9_-]+(?:\.[A-Za-z0-9_-]+)+$ {
+            if ($request_method !~ ^(GET|HEAD)$) { return 405; }
+            root /usr/share/nginx/html;
+            include /etc/nginx/mime.types;
+            default_type application/octet-stream;
+            try_files $uri =404;
+        }
         location / { return 404; }
     }
 }
