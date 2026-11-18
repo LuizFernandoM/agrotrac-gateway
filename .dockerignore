@@ -1,0 +1,7 @@
+**
+!Dockerfile
+!nginx.conf.template
+!proxy-common.conf
+!proxy-live.conf
+!entrypoint.sh
+!protected.conf

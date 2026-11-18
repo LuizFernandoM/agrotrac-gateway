@@ -1,47 +1,32 @@
-# AgroTrac Gateway — API Gateway & Proxy Reverso
+# AgroTrac Gateway
 
-Componente de borda responsável por centralizar a porta de entrada única do ecossistema **AgroTrac**, em estrita conformidade com a especificação original (`acac36b6`).
+Gateway Nginx para Core, Audit e Live. O contrato de rotas, autenticação e integração está em [docs/contracts.md](docs/contracts.md). As evidências da execução local estão em [docs/validation.md](docs/validation.md).
 
----
+## Configuração
 
-## 1. Responsabilidades
+A imagem usa Nginx 1.28.2 Alpine. O entrypoint valida os valores antes de renderizar a configuração. O listener interno usa a porta 8080. Configure estas variáveis explicitamente.
 
-- **Ponto Único de Entrada**: Recebe todas as requisições externas originadas do Portal Web e do Aplicativo Mobile.
-- **Roteamento Inteligente**: Encaminha as chamadas HTTP/HTTPS para o microsserviço correspondente (Core A, Live B ou Audit C).
-- **Suporte a WebSockets (WSS)**: Realiza o upgrade transparente de protocolo HTTP para WebSocket persistente direcionado ao Live B.
-- **Isolamento de Infraestrutura**: Evita expor portas internas de microsserviços, Redis, RabbitMQ e bancos de dados para a rede externa.
-- **Transparência de Domínio**: Não concentra regras de negócio do domínio (atua estritamente como camada de transporte e roteamento).
+| Variável | Valor |
+|---|---|
+| GATEWAY_MODE | local-http para teste em loopback, tls para TLS no Nginx |
+| GATEWAY_HOST | Host autorizado, com porta explícita quando enviada pelos clientes |
+| CORE_UPSTREAM | DNS privado do Core e porta, por exemplo agrotrac-core:3001 |
+| LIVE_UPSTREAM | DNS privado do Live e porta, por exemplo agrotrac-live:3002 |
+| AUDIT_UPSTREAM | DNS privado do Audit e porta, por exemplo agrotrac-audit:3003 |
 
----
+Para TLS, provisionar fullchain.pem e privkey.pem em /run/agrotrac/tls, montados somente leitura. A configuração final de certificado, origem, bind e publicação passa pela coordenação. Nginx resolve os nomes de upstream ao carregar a configuração. Se um upstream for recriado e mudar de endereço, recarregar o Gateway após validar com nginx -t.
 
-## 2. Ferramentas e Tecnologias
+O Gateway encaminha o caminho e a query dos endpoints permitidos e valida sessões com GET /internal/auth/verify no Live. Os caminhos de verificação interna e as variantes não canônicas recebem 404 externamente. Somente o status 204 do verificador permite encaminhamento. A política de Origin, CSRF, papéis e revogação é responsabilidade do Live. Core e Audit recebem apenas os cabeçalhos operacionais explicitamente permitidos, sem identidade nem credenciais. Os logs de acesso registram apenas status, tamanho e tempo. As mensagens detalhadas de erro do Nginx ficam desabilitadas porque podem incluir a requisição original.
 
-- **Servidor Web / Proxy Reverso**: Nginx (imagem Docker oficial `nginx:alpine`).
-- **Configuração**: Arquivo `nginx.conf` declarativo com diretivas de proxy reverso e cabeçalhos de WebSocket (`Upgrade` e `Connection`).
+A integração com serviços reais depende da implementação de autenticação no Live e do perfil container aprovado pela coordenação. Core e Audit mantêm loopback por padrão e aceitam configuração explícita por CORE_HOST e AUDIT_HOST. O Live atual restringe LIVE_HOST e o listener a 127.0.0.1. O proprietário do Live precisa implementar o perfil container de bind privado e a integração deve usar comunicação por DNS na rede Docker, com Gateway como única porta publicada. Nenhuma configuração da infraestrutura existente é aplicada pelo Gateway.
 
----
+## Validação local isolada
 
-## 3. Mapeamento de Rotas e Arquitetura
+Execute em agrotrac-gateway/test com Node.js 22, npm, Docker e Compose.
 
-O Gateway recebe as requisições na porta pública e distribui internamente pela rede Docker (`agrotrac-network`):
+    npm ci --ignore-scripts --no-audit --no-fund
+    npm test
 
-| Rota Externa | Protocolo | Destino Interno | Microsserviço |
-| :--- | :--- | :--- | :--- |
-| `/v1/core/*` | HTTP / REST | `http://agrotrac-core:3001` | Core A (Silos, Janelas, Reservas) |
-| `/v1/live/*` | HTTP / REST | `http://agrotrac-live:3002` | Live B (Autenticação e Sessões) |
-| `/live` | WebSocket (WSS) | `http://agrotrac-live:3002/live` | Live B (Canal de Tempo Real) |
-| `/v1/audit/*` | HTTP / REST | `http://agrotrac-audit:3003` | Audit C (Sync Pesagens, Histórico) |
+O runner cria um projeto Compose com nome próprio, publica uma porta efêmera em 127.0.0.1 e exercita HTTP e WebSocket com o Nginx real. As fixtures Node ocupam somente a rede privada e a ferramenta envia Host gateway.test. O runner registra os IDs, verifica nginx -V e nginx -t e para seus containers preservando os recursos. Se uma interrupção externa impedir o teardown, usar docker compose -f compose.test.yaml -p PROJETO stop com o nome emitido pelo runner, a partir do Gateway.
 
-```text
-agrotrac-gateway/
-├── nginx.conf                   # Configuração das rotas e buffers de proxy
-├── Dockerfile                   # Build do contêiner Nginx
-└── README.md
-```
-
----
-
-## 4. Conexões e Integrações
-
-- **Porta Externa Exposta**: `8080` (HTTP) / `8443` (WSS/HTTPS local).
-- **Comunicação Interna**: Conecta-se aos demais contêineres pela rede interna do Docker (`agrotrac-network`).
+Os testes demonstram o comportamento do proxy com upstreams controlados. Autenticação persistente, regras de negócio, integração com serviços reais, HTTPS/WSS e sincronização física do iPhone seguem como critérios de aceite integrado.

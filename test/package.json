@@ -1,0 +1,5 @@
+{
+  "private": true,
+  "scripts": { "test": "node run.mjs" },
+  "dependencies": { "ws": "8.18.3" }
+}

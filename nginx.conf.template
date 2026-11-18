@@ -1,0 +1,200 @@
+user nginx;
+worker_processes auto;
+error_log /dev/null;
+pid /var/run/nginx.pid;
+
+events { worker_connections 1024; }
+
+http {
+    log_format metrics '$status $body_bytes_sent $request_time';
+    access_log /dev/stdout metrics;
+    server_tokens off;
+    default_type application/json;
+    client_max_body_size 64k;
+    client_body_timeout 30s;
+    client_header_timeout 10s;
+    proxy_http_version 1.1;
+    proxy_connect_timeout 2s;
+    proxy_read_timeout 8s;
+    proxy_send_timeout 30s;
+    proxy_next_upstream off;
+    proxy_intercept_errors off;
+    proxy_ignore_headers X-Accel-Redirect X-Accel-Buffering;
+    proxy_request_buffering on;
+    proxy_buffering off;
+
+    # Match the original spelling before Nginx's normalized location routing.
+    map $request_uri $canonical_path {
+        default "";
+        ~^(/(?:[A-Za-z0-9_-]+(?:/[A-Za-z0-9_-]+)*)?)(?:[?].*)?$ $1;
+    }
+    map $http_upgrade $upgrade_connection {
+        default upgrade;
+        "" close;
+    }
+    map $http_host $valid_authority {
+        default 0;
+        "${GATEWAY_HOST}" 1;
+    }
+    map $verified_status $authorized_core { default ""; 204 core_backend; }
+    map $verified_status $authorized_audit { default ""; 204 audit_backend; }
+    map $verified_status $authorized_live { default ""; 204 live_backend; }
+    limit_req_zone $binary_remote_addr zone=login:1m rate=5r/s;
+    limit_req_zone $binary_remote_addr zone=health:1m rate=10r/s;
+    limit_req_status 429;
+
+    upstream core_backend { server ${CORE_UPSTREAM}; }
+    upstream audit_backend { server ${AUDIT_UPSTREAM}; }
+    upstream live_backend { server ${LIVE_UPSTREAM}; }
+
+    server {
+        listen 8080 ${GATEWAY_TLS} default_server;
+        ${GATEWAY_TLS_CONFIG}
+        server_name ${GATEWAY_NAME};
+        add_header Cache-Control "no-store" always;
+        add_header X-Content-Type-Options nosniff always;
+        proxy_hide_header Cache-Control;
+        if ($valid_authority = 0) { return 400; }
+        if ($host != "${GATEWAY_NAME}") { return 400; }
+        if ($canonical_path = "") { return 404; }
+
+        error_page 401 = @unauthenticated;
+        error_page 403 = @forbidden;
+        error_page 429 = @rate_limited;
+        error_page 500 502 504 = @unavailable;
+        location @unauthenticated { return 401 '{"error":{"code":"UNAUTHENTICATED"}}'; }
+        location @forbidden { return 403 '{"error":{"code":"FORBIDDEN"}}'; }
+        location @rate_limited {
+            add_header Cache-Control "no-store" always;
+            add_header X-Content-Type-Options nosniff always;
+            # Round the longest interval between admitted requests up to one second.
+            add_header Retry-After 1 always;
+            return 429 '{"error":{"code":"RATE_LIMITED"}}';
+        }
+        location @unavailable { return 503 '{"error":{"code":"SERVICE_UNAVAILABLE"}}'; }
+
+        location = /_agrotrac_auth {
+            internal;
+            # The subrequest inherits Content-Length for location checks, but sends no body.
+            client_max_body_size 12m;
+            access_log off;
+            proxy_method GET;
+            proxy_pass_request_body off;
+            proxy_pass_request_headers off;
+            proxy_set_header Content-Length "";
+            proxy_set_header Connection "";
+            proxy_set_header Authorization $http_authorization;
+            proxy_set_header Cookie $http_cookie;
+            proxy_set_header Origin $http_origin;
+            proxy_set_header X-CSRF-Token $http_x_csrf_token;
+            proxy_set_header X-Original-Method $original_method;
+            proxy_set_header X-Original-URI $original_path;
+            proxy_set_header X-Forwarded-For $remote_addr;
+            proxy_set_header X-Forwarded-Proto $scheme;
+            proxy_set_header X-Correlation-Id $http_x_correlation_id;
+            proxy_read_timeout 3s;
+            proxy_pass http://live_backend/internal/auth/verify;
+        }
+
+        location = /health/live {
+            if ($request_method != GET) { return 405; }
+            limit_req zone=health burst=20 nodelay;
+            try_files "" @health_alive;
+        }
+        location @health_alive { return 200 '{"status":"alive"}'; }
+        location = /health/ready {
+            if ($request_method !~ ^(GET)$) { return 405; }
+            include /etc/agrotrac/proxy-common.conf;
+            limit_req zone=health burst=20 nodelay;
+            proxy_read_timeout 3s;
+            proxy_pass http://live_backend;
+        }
+        location = /v1/live/auth/login {
+            if ($request_method !~ ^(POST)$) { return 405; }
+            client_max_body_size 16k;
+            include /etc/agrotrac/proxy-live.conf;
+            limit_req zone=login burst=10 nodelay;
+            if ($http_content_type !~* "^application/json(?:[ ]*;.*)?$") { return 415; }
+            proxy_pass http://live_backend;
+        }
+        location = /v1/live/auth/session {
+            if ($request_method !~ ^(GET)$) { return 405; }
+            include /etc/agrotrac/protected.conf;
+            include /etc/agrotrac/proxy-live.conf;
+            proxy_pass http://$authorized_live;
+        }
+        location = /v1/live/auth/logout {
+            if ($request_method !~ ^(POST)$) { return 405; }
+            include /etc/agrotrac/protected.conf;
+            include /etc/agrotrac/proxy-live.conf;
+            proxy_pass http://$authorized_live;
+        }
+        location = /v1/live/snapshot {
+            if ($request_method !~ ^(GET)$) { return 405; }
+            include /etc/agrotrac/protected.conf;
+            include /etc/agrotrac/proxy-live.conf;
+            proxy_pass http://$authorized_live;
+        }
+        location = /live {
+            if ($request_method !~ ^(GET)$) { return 405; }
+            include /etc/agrotrac/protected.conf;
+            include /etc/agrotrac/proxy-live.conf;
+            if ($args != "") { return 400; }
+            if ($http_upgrade !~* ^websocket$) { return 400; }
+            proxy_read_timeout 45s;
+            proxy_pass http://$authorized_live;
+        }
+        location ~ ^/v1/core/(silos|windows|bookings)$ {
+            if ($request_method !~ ^(GET|POST)$) { return 405; }
+            include /etc/agrotrac/protected.conf;
+            include /etc/agrotrac/proxy-common.conf;
+            proxy_pass http://$authorized_core;
+        }
+        location ~ "^/v1/core/(silos|windows)/[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$" {
+            if ($request_method !~ ^(GET)$) { return 405; }
+            include /etc/agrotrac/protected.conf;
+            include /etc/agrotrac/proxy-common.conf;
+            proxy_pass http://$authorized_core;
+        }
+        location ~ "^/v1/core/bookings/[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$" {
+            if ($request_method !~ ^(GET|DELETE)$) { return 405; }
+            include /etc/agrotrac/protected.conf;
+            include /etc/agrotrac/proxy-common.conf;
+            proxy_pass http://$authorized_core;
+        }
+        location ~ "^/v1/core/windows/[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}/status$" {
+            if ($request_method !~ ^(PATCH)$) { return 405; }
+            include /etc/agrotrac/protected.conf;
+            include /etc/agrotrac/proxy-common.conf;
+            proxy_pass http://$authorized_core;
+        }
+        location = /v1/audit/events {
+            if ($request_method !~ ^(GET)$) { return 405; }
+            include /etc/agrotrac/protected.conf;
+            include /etc/agrotrac/proxy-common.conf;
+            proxy_pass http://$authorized_audit;
+        }
+        location = /v1/audit/weighings {
+            if ($request_method !~ ^(GET)$) { return 405; }
+            include /etc/agrotrac/protected.conf;
+            include /etc/agrotrac/proxy-common.conf;
+            proxy_pass http://$authorized_audit;
+        }
+        location ~ "^/v1/audit/weighings/[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}/romaneio$" {
+            if ($request_method !~ ^(GET)$) { return 405; }
+            include /etc/agrotrac/protected.conf;
+            include /etc/agrotrac/proxy-common.conf;
+            proxy_pass http://$authorized_audit;
+        }
+        location = /v1/audit/weighings/sync {
+            if ($request_method !~ ^(POST)$) { return 405; }
+            client_max_body_size 12m;
+            include /etc/agrotrac/protected.conf;
+            include /etc/agrotrac/proxy-common.conf;
+            proxy_read_timeout 30s;
+            proxy_pass http://$authorized_audit;
+        }
+
+        location / { return 404; }
+    }
+}

@@ -1,0 +1,24 @@
+services:
+  gateway:
+    build: .
+    environment:
+      GATEWAY_MODE: local-http
+      GATEWAY_HOST: gateway.test
+      CORE_UPSTREAM: fixture:3001
+      LIVE_UPSTREAM: fixture:3002
+      AUDIT_UPSTREAM: fixture:3003
+    ports:
+      - '127.0.0.1::8080'
+    networks: [private, edge]
+    depends_on: [fixture]
+  fixture:
+    image: node:22.14.0-alpine
+    working_dir: /fixture
+    command: [node, fixture.mjs]
+    volumes:
+      - ./test:/fixture:ro
+    networks: [private]
+networks:
+  private:
+    internal: true
+  edge: {}
