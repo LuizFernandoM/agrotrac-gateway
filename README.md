@@ -18,7 +18,9 @@ Para TLS, provisionar fullchain.pem e privkey.pem em /run/agrotrac/tls, montados
 
 O Gateway encaminha o caminho e a query dos endpoints permitidos e valida sessões com GET /internal/auth/verify no Live. Os caminhos de verificação interna e as variantes não canônicas recebem 404 externamente. Somente o status 204 do verificador permite encaminhamento. A política de Origin, CSRF, papéis e revogação é responsabilidade do Live. Core e Audit recebem apenas os cabeçalhos operacionais explicitamente permitidos, sem identidade nem credenciais. Os logs de acesso registram apenas status, tamanho e tempo. As mensagens detalhadas de erro do Nginx ficam desabilitadas porque podem incluir a requisição original.
 
-A integração com serviços reais depende da implementação de autenticação no Live e do perfil container aprovado pela coordenação. Core e Audit mantêm loopback por padrão e aceitam configuração explícita por CORE_HOST e AUDIT_HOST. O Live atual restringe LIVE_HOST e o listener a 127.0.0.1. O proprietário do Live precisa implementar o perfil container de bind privado e a integração deve usar comunicação por DNS na rede Docker, com Gateway como única porta publicada. Nenhuma configuração da infraestrutura existente é aplicada pelo Gateway.
+## Executar na homologação
+
+Use Docker com Compose e siga o guia `agrotrac-infra/docs/homologacao-compose.md` no workspace com os repositórios irmãos. O Gateway usa DNS privado para Core, Audit e Live e serve o portal na mesma origem da API e do WebSocket.
 
 ## Validação local isolada
 
@@ -29,4 +31,4 @@ Execute em agrotrac-gateway/test com Node.js 22, npm, Docker e Compose.
 
 O runner cria um projeto Compose com nome próprio, publica uma porta efêmera em 127.0.0.1 e exercita HTTP e WebSocket com o Nginx real. As fixtures Node ocupam somente a rede privada e a ferramenta envia Host gateway.test. O runner registra os IDs, verifica nginx -V e nginx -t e para seus containers preservando os recursos. Se uma interrupção externa impedir o teardown, usar docker compose -f compose.test.yaml -p PROJETO stop com o nome emitido pelo runner, a partir do Gateway.
 
-Os testes demonstram o comportamento do proxy com upstreams controlados. Autenticação persistente, regras de negócio, integração com serviços reais, HTTPS/WSS e sincronização física do iPhone seguem como critérios de aceite integrado.
+Os testes demonstram o comportamento do proxy com upstreams controlados. Consulte o relatório funcional da Infra para as evidências de autenticação real, WebSocket e sincronização no iPhone.
